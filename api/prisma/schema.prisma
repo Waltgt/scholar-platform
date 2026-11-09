@@ -1,0 +1,210 @@
+// Prisma ORM 7
+// La URL de conexión ya no va aquí: se define en prisma.config.ts
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "ts" // tsc las reescribe a .js al compilar (rewriteRelativeImportExtensions)
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Rol {
+  ADMIN
+  CATEDRATICO
+  PADRE
+  ESTUDIANTE
+}
+
+enum EstadoPedido {
+  PENDIENTE
+  PAGADO
+  FALLIDO
+  CANCELADO
+}
+
+enum EstadoPago {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+}
+
+// ─────────────────────────────────────────────
+// Usuarios y autenticación
+// ─────────────────────────────────────────────
+
+model Usuario {
+  id             Int      @id @default(autoincrement())
+  email          String   @unique
+  passwordHash   String   @map("password_hash")
+  nombre         String
+  apellido       String
+  rol            Rol
+  activo         Boolean  @default(true)
+  // Secreto TOTP cifrado (AES-GCM) con una llave que vive en el .env de la VM app, nunca en la BD
+  totpSecretEnc  String?  @map("totp_secret_enc")
+  totpHabilitado Boolean  @default(false) @map("totp_habilitado")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  estudiante Estudiante?  @relation("UsuarioEstudiante") // rol = ESTUDIANTE
+  hijos      Estudiante[] @relation("PadreEstudiante")   // rol = PADRE
+  cursos     Curso[]                                     // rol = CATEDRATICO
+  pedidos    Pedido[]
+
+  @@map("usuarios")
+}
+
+// ─────────────────────────────────────────────
+// Módulo académico (un solo ciclo escolar)
+// ─────────────────────────────────────────────
+
+model Estudiante {
+  id        Int    @id @default(autoincrement())
+  carne     String @unique
+  usuarioId Int    @unique @map("usuario_id")
+
+  usuario       Usuario       @relation("UsuarioEstudiante", fields: [usuarioId], references: [id])
+  padres        Usuario[]     @relation("PadreEstudiante")
+  inscripciones Inscripcion[]
+
+  @@map("estudiantes")
+}
+
+model Curso {
+  id            Int    @id @default(autoincrement())
+  codigo        String @unique
+  nombre        String
+  catedraticoId Int    @map("catedratico_id")
+
+  catedratico   Usuario       @relation(fields: [catedraticoId], references: [id])
+  inscripciones Inscripcion[]
+
+  @@index([catedraticoId])
+  @@map("cursos")
+}
+
+model Periodo {
+  id     Int    @id @default(autoincrement())
+  numero Int    @unique // 1..4
+  nombre String          // "Bimestre 1"
+
+  notas Nota[]
+
+  @@map("periodos")
+}
+
+model Inscripcion {
+  id           Int @id @default(autoincrement())
+  estudianteId Int @map("estudiante_id")
+  cursoId      Int @map("curso_id")
+
+  estudiante Estudiante @relation(fields: [estudianteId], references: [id])
+  curso      Curso      @relation(fields: [cursoId], references: [id])
+  notas      Nota[]
+
+  @@unique([estudianteId, cursoId])
+  @@index([cursoId])
+  @@map("inscripciones")
+}
+
+model Nota {
+  id            Int      @id @default(autoincrement())
+  inscripcionId Int      @map("inscripcion_id")
+  periodoId     Int      @map("periodo_id")
+  valor         Decimal  @db.Decimal(5, 2) // 0–100, CHECK en la migración
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  inscripcion Inscripcion @relation(fields: [inscripcionId], references: [id])
+  periodo     Periodo     @relation(fields: [periodoId], references: [id])
+
+  // Una nota por curso-estudiante por periodo; permite upsert al editar
+  @@unique([inscripcionId, periodoId])
+  @@index([periodoId])
+  @@map("notas")
+}
+
+// ─────────────────────────────────────────────
+// Comercio electrónico (uniformes)
+// ─────────────────────────────────────────────
+
+model Producto {
+  id          Int      @id @default(autoincrement())
+  nombre      String
+  descripcion String?
+  precio      Decimal  @db.Decimal(10, 2)
+  activo      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  variantes ProductoVariante[]
+
+  @@map("productos")
+}
+
+model ProductoVariante {
+  id         Int    @id @default(autoincrement())
+  productoId Int    @map("producto_id")
+  talla      String
+  sku        String @unique
+  stock      Int    @default(0) // CHECK >= 0 en la migración
+
+  producto Producto     @relation(fields: [productoId], references: [id])
+  items    PedidoItem[]
+
+  @@unique([productoId, talla])
+  @@map("producto_variantes")
+}
+
+model Pedido {
+  id        Int          @id @default(autoincrement())
+  usuarioId Int          @map("usuario_id")
+  estado    EstadoPedido @default(PENDIENTE)
+  total     Decimal      @db.Decimal(10, 2) // calculado en el servidor, nunca recibido del cliente
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  usuario Usuario      @relation(fields: [usuarioId], references: [id])
+  items   PedidoItem[]
+  pagos   Pago[]
+
+  @@index([usuarioId])
+  @@map("pedidos")
+}
+
+model PedidoItem {
+  id             Int     @id @default(autoincrement())
+  pedidoId       Int     @map("pedido_id")
+  varianteId     Int     @map("variante_id")
+  cantidad       Int     // CHECK > 0 en la migración
+  precioUnitario Decimal @db.Decimal(10, 2) @map("precio_unitario") // precio al momento de la compra
+
+  pedido   Pedido           @relation(fields: [pedidoId], references: [id])
+  variante ProductoVariante @relation(fields: [varianteId], references: [id])
+
+  @@unique([pedidoId, varianteId])
+  @@map("pedido_items")
+}
+
+model Pago {
+  id         Int        @id @default(autoincrement())
+  pedidoId   Int        @map("pedido_id")
+  proveedor  String     // "DUMMY" por ahora
+  referencia String?
+  estado     EstadoPago @default(PENDIENTE)
+  monto      Decimal    @db.Decimal(10, 2)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id])
+
+  @@index([pedidoId])
+  @@map("pagos")
+}
