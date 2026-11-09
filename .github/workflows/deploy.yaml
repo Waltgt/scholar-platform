@@ -1,0 +1,80 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nunca dos despliegues al mismo tiempo; el segundo espera al primero
+concurrency:
+  group: deploy-scholar
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, scholar]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # Fijado por SHA del commit (no por tag) para evitar tags movidos
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ───────────── Seguridad ─────────────
+      - name: Semgrep (SAST) - bloquea en ERROR
+        run: |
+          semgrep scan --metrics=off \
+            --config p/typescript --config p/javascript --config p/secrets \
+            --severity ERROR --error .
+
+      - name: Semgrep (SAST) - informe de advertencias
+        run: |
+          semgrep scan --metrics=off \
+            --config p/typescript --config p/javascript --config p/secrets \
+            --severity WARNING . || true
+
+      - name: Trivy (dependencias y secretos) - bloquea en HIGH/CRITICAL
+        run: |
+          trivy fs --scanners vuln,secret \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 .
+
+      # ───────────── Build ─────────────
+      - name: Build API
+        working-directory: api
+        env:
+          # prisma.config.ts exige DATABASE_URL aunque generate no se conecte
+          DATABASE_URL: postgresql://build:build@localhost:5432/build
+        run: |
+          npm ci
+          npm run build
+          npm prune --omit=dev
+
+      - name: Build Web
+        working-directory: web
+        run: |
+          npm ci
+          npx eslint .
+          npm run build
+
+      # ───────────── Deploy ─────────────
+      - name: Deploy API (migraciones + reinicio)
+        run: bash deploy/api.sh
+
+      - name: Deploy Web
+        run: bash deploy/web.sh
+
+      - name: Verificación de salud (web → app → db)
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsk https://10.0.2.10/api/health | grep -q '"db":"ok"'; then
+              echo "Despliegue verificado"
+              exit 0
+            fi
+            echo "Intento $i: aún no responde, reintentando..."
+            sleep 3
+          done
+          echo "La verificación de salud falló"
+          exit 1
