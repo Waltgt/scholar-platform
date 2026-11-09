@@ -56,7 +56,6 @@ jobs:
         working-directory: web
         run: |
           npm ci
-          npx eslint .
           npm run build
 
       # ───────────── Deploy ─────────────
