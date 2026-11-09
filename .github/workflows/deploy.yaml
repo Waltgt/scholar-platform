@@ -68,11 +68,12 @@ jobs:
       - name: Verificación de salud (web → app → db)
         run: |
           for i in $(seq 1 10); do
-            if curl -fsk https://10.0.2.10/api/health | grep -q '"db":"ok"'; then
-              echo "Despliegue verificado"
+            BODY=$(curl -sk -w ' HTTP_%{http_code}' https://10.0.2.10/api/health || true)
+            if echo "$BODY" | grep -q '"db":"ok"'; then
+              echo "Despliegue verificado: $BODY"
               exit 0
             fi
-            echo "Intento $i: aún no responde, reintentando..."
+            echo "Intento $i: $BODY"
             sleep 3
           done
           echo "La verificación de salud falló"
